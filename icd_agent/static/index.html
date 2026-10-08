@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICD-Assistent</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --text:#1d1d1b; --muted:#6b6b66; --border:#e2e2dc; --accent:#2f6f5e;
+          --ok:#2f7d4f; --warn:#a86b00; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --card:#1f1f1d; --text:#ecece8; --muted:#a0a09a; --border:#33332f; --accent:#6fbfa6;
+            --ok:#6fcf97; --warn:#e0a83a; --err:#ef8a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .95rem; }
+  textarea { width:100%; min-height:160px; padding:12px; font:inherit; color:inherit; background:var(--card);
+             border:1px solid var(--border); border-radius:8px; resize:vertical; }
+  button { margin-top:12px; padding:10px 20px; font:inherit; font-weight:600; color:#fff; background:var(--accent);
+           border:0; border-radius:8px; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .hinweis { font-size:.85rem; color:var(--muted); margin-top:8px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-top:12px; }
+  .code { font-family: ui-monospace, monospace; font-weight:700; font-size:1.1rem; }
+  .row { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .badge { font-size:.75rem; padding:2px 8px; border-radius:99px; border:1px solid currentColor; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); } .muted { color:var(--muted); }
+  .begr { color:var(--muted); margin-top:4px; font-size:.95rem; }
+  ul { margin:6px 0 0; padding-left:20px; }
+  .kopie { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ICD-10-GM-Assistent</h1>
+  <p class="sub" id="status">Lade …</p>
+
+  <textarea id="text" placeholder="Diagnosen oder Anamnese eingeben, z. B.:
+Pat. mit bekanntem Diabetes mellitus Typ 2, jetzt V. a. diabetische Nephropathie. Art. Hypertonie seit Jahren. Z. n. Knie-TEP rechts 2021."></textarea>
+  <button id="los">ICD-Codes vorschlagen</button>
+  <p class="hinweis">Keine Namen, Geburtsdaten oder andere identifizierende Patientendaten eingeben. Die Vorschläge sind eine Hilfe und müssen ärztlich geprüft werden.</p>
+
+  <div id="ergebnis"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const SICHERHEIT = {G:"gesichert", V:"Verdacht", Z:"Zustand nach", A:"ausgeschlossen"};
+
+fetch("/api/status").then(r => r.json()).then(s => {
+  $("status").innerHTML = s.katalog
+    ? `Katalog: ${esc(s.katalog)} (${s.anzahl.toLocaleString("de-DE")} Codes) – jeder Vorschlag wird gegen den Katalog geprüft.`
+    : `<span class="warn">Kein ICD-10-GM-Katalog geladen – Codes sind ungeprüft (siehe data/README.md).</span>`;
+});
+
+function status(c) {
+  if (c.im_katalog === null) return `<span class="badge muted">ungeprüft</span>`;
+  if (!c.im_katalog) return `<span class="badge err">nicht im Katalog</span>`;
+  if (!c.endstellig) return `<span class="badge warn">nicht endstellig</span>`;
+  return `<span class="badge ok">geprüft</span>`;
+}
+
+function anzeigen(e) {
+  let html = "";
+  if (e.codes.length) {
+    const zeile = e.codes.map(c => c.code + c.diagnosesicherheit + (c.seitenlokalisation !== "keine" ? " " + c.seitenlokalisation : "")).join("; ");
+    html += `<div class="card"><div class="muted">Zum Kopieren</div><div class="kopie">${esc(zeile)}</div></div>`;
+  }
+  for (const c of e.codes) {
+    const seite = c.seitenlokalisation !== "keine" ? ` · Seite ${esc(c.seitenlokalisation)}` : "";
+    html += `<div class="card"><div class="row"><span class="code">${esc(c.code)}</span>
+      <span>${esc(c.titel)}</span>${status(c)}</div>
+      <div class="muted">${esc(SICHERHEIT[c.diagnosesicherheit] || c.diagnosesicherheit)}${seite}</div>
+      <div class="begr">${esc(c.begruendung)}</div></div>`;
+  }
+  if (e.rueckfragen.length) html += `<div class="card"><strong>Für genauere Kodierung fehlt:</strong><ul>${e.rueckfragen.map(f => `<li>${esc(f)}</li>`).join("")}</ul></div>`;
+  if (e.hinweise.length) html += `<div class="card"><strong>Hinweise:</strong><ul>${e.hinweise.map(f => `<li>${esc(f)}</li>`).join("")}</ul></div>`;
+  $("ergebnis").innerHTML = html || `<div class="card">Keine Codes gefunden.</div>`;
+}
+
+$("los").addEventListener("click", async () => {
+  const btn = $("los");
+  btn.disabled = true; btn.textContent = "Kodiere …";
+  $("ergebnis").innerHTML = "";
+  try {
+    const r = await fetch("/api/kodieren", {method:"POST", headers:{"Content-Type":"application/json"},
+                                            body: JSON.stringify({text: $("text").value})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.fehler || "Unbekannter Fehler");
+    anzeigen(d);
+  } catch (err) {
+    $("ergebnis").innerHTML = `<div class="card err">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "ICD-Codes vorschlagen";
+  }
+});
+</script>
+</body>
+</html>
